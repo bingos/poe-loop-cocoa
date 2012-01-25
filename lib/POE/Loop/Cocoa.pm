@@ -19,20 +19,16 @@ my $loop;
 my $_watcher_timer;
 my $_idle_timer;
 my %signal_watcher;
+my %handle_watchers;
 
 sub loop_initialize {
-  my $self = shift;
-
-  $loop = IO::Async::Loop->new;
 }
 
 sub loop_finalize {
-  my $self = shift;
 }
 
 sub loop_do_timeslice {
-  my $self = shift;
-  $loop->loop_once(@_);
+  Cocoa::EventLoop->run_while(0.1)
 }
 
 sub loop_run {
@@ -47,7 +43,6 @@ sub loop_run {
 }
 
 sub loop_halt {
-  $loop->loop_stop();
 }
 
 sub loop_watch_filehandle {
@@ -56,9 +51,10 @@ sub loop_watch_filehandle {
 
   if ($mode == MODE_RD) {
 
-    $loop->watch_io(
-      handle => $handle,
-      on_read_ready =>
+  $handle_watchers{watch_r}{$handle} = Cocoa::EventLoop->io(
+      fh   => $handle,
+      poll => 'r',
+      cb   =>
         sub {
           my $self = $poe_kernel;
           if (TRACE_FILES) {
@@ -66,7 +62,6 @@ sub loop_watch_filehandle {
           }
           $self->_data_handle_enqueue_ready(MODE_RD, $fileno);
           $self->_test_if_kernel_is_idle();
-          # Return false to stop... probably not with this one.
           return 0;
         },
     );
@@ -74,9 +69,10 @@ sub loop_watch_filehandle {
   }
   elsif ($mode == MODE_WR) {
 
-    $loop->watch_io(
-      handle => $handle,
-      on_write_ready =>
+  $handle_watchers{watch_w}{$handle} = Cocoa::EventLoop->io(
+      fh   => $handle,
+      poll => 'w',
+      cb   =>
         sub {
           my $self = $poe_kernel;
           if (TRACE_FILES) {
@@ -84,14 +80,13 @@ sub loop_watch_filehandle {
           }
           $self->_data_handle_enqueue_ready(MODE_WR, $fileno);
           $self->_test_if_kernel_is_idle();
-          # Return false to stop... probably not with this one.
           return 0;
         },
     );
 
   }
   else {
-    confess "IO::Async does not support expedited filehandles";
+    confess "Cocoa::EventLoop::io does not support expedited filehandles";
   }
 }
 
@@ -100,18 +95,10 @@ sub loop_ignore_filehandle {
   my $fileno = fileno($handle);
 
   if ( $mode == MODE_EX ) {
-    confess "IO::Async does not support expedited filehandles";
+    confess "Cocoa::EventLoop::io does not support expedited filehandles";
   }
 
-  $loop->unwatch_io(
-    handle => $handle,
-    (
-      ( $mode == MODE_RD ) ?
-      ( on_read_ready => 1 ) :
-      ( on_write_ready => 1 )
-    ),
-  );
-
+  delete $handle_watchers{ $mode == MODE_RD ? 'watch_r' : 'watch_w' }{$handle};
 }
 
 sub loop_pause_filehandle {
@@ -124,25 +111,24 @@ sub loop_resume_filehandle {
 
 sub loop_resume_time_watcher {
   my ($self, $next_time) = @_;
-  return unless $next_time;
-  $_watcher_timer = $loop->enqueue_timer( time => $next_time, code => \&_loop_event_callback);
+  return unless defined $next_time;
+  $next_time -= time();
+  $next_time = 0 if $next_time < 0;
+  $_watcher_timer = Cocoa::EventLoop->timer( after => $next_time, cb => \&_loop_event_callback);
 }
 
 sub loop_reset_time_watcher {
   my ($self, $next_time) = @_;
-  $loop->cancel_timer($_watcher_timer) if $_watcher_timer;
   undef $_watcher_timer;
   $self->loop_resume_time_watcher($next_time);
 }
 
 sub _loop_resume_timer {
-  $loop->unwatch_idle($_idle_timer) if $_idle_timer;
   undef $_idle_timer;
   $poe_kernel->loop_resume_time_watcher($poe_kernel->get_next_event_time());
 }
 
 sub loop_pause_time_watcher {
-  # does nothing
 }
 
 # Event callback to dispatch pending events.
@@ -157,13 +143,11 @@ sub _loop_event_callback {
 
   # Register the next timeout if there are events left.
   if ($self->get_event_count()) {
-    $_idle_timer = $loop->watch_idle( when => 'later', code => \&_loop_resume_timer );
+    $_idle_timer = Cocoa::EventLoop->timer( cb => \&_loop_resume_timer );
   }
 
-  # Return false to stop.
   return 0;
 }
-
 1;
 
 =begin poe_tests
